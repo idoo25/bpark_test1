@@ -13,15 +13,13 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Random;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import entities.ParkingOrder;
 import entities.ParkingSubscriber;
+import services.EmailService; // 🆕 ADD THIS IMPORT
 
 /**
- * Enhanced ParkingController with auto-cancellation service
+ * Enhanced ParkingController with email notifications
  * Handles all database operations for the ParkB parking management system.
  */
 public class ParkingController {
@@ -169,7 +167,7 @@ public class ParkingController {
     }
 
     /**
-     * Makes a parking reservation - NOW CREATES PREORDER STATUS
+     * Makes a parking reservation - NOW CREATES PREORDER STATUS WITH EMAIL
      */
     public String makeReservation(String userName, String reservationDateStr) {
         // Check if reservation is possible
@@ -216,7 +214,17 @@ public class ParkingController {
                     if (generatedKeys.next()) {
                         int reservationCode = generatedKeys.getInt(1);
                         System.out.println("New preorder reservation created: " + reservationCode + " (15-min auto-cancel rule applies)");
-                        return "Reservation confirmed. Code: " + reservationCode + " (Status: PREORDER - will auto-cancel if 15+ min late)";
+                        
+                        // 🆕 SEND EMAIL CONFIRMATION
+                        ParkingSubscriber user = getUserInfo(userName);
+                        if (user != null && user.getEmail() != null) {
+                            EmailService.sendReservationConfirmation(
+                                user.getEmail(), user.getFirstName(), 
+                                String.valueOf(reservationCode), reservationDateStr, "Spot " + parkingSpotID
+                            );
+                        }
+                        
+                        return "Reservation confirmed. Confirmation code: " + reservationCode;
                     }
                 }
             }
@@ -348,7 +356,7 @@ public class ParkingController {
     }
     
     /**
-     * Registers a new subscriber in the system
+     * Registers a new subscriber in the system - WITH EMAIL NOTIFICATIONS
      */
     public String registerNewSubscriber(String name, String phone, String email, String carNumber, String userName) {
         // Validate input
@@ -393,6 +401,11 @@ public class ParkingController {
             int rowsInserted = stmt.executeUpdate();
             if (rowsInserted > 0) {
                 System.out.println("New subscriber registered: " + userName);
+                
+                // 🆕 SEND EMAIL NOTIFICATIONS
+                EmailService.sendRegistrationConfirmation(email, name, userName);
+                EmailService.sendWelcomeMessage(email, name, userName);
+                
                 return "SUCCESS:Subscriber registered successfully. Username: " + userName;
             }
         } catch (SQLException e) {
@@ -487,7 +500,7 @@ public class ParkingController {
     }
 
     /**
-     * Extends parking time
+     * Extends parking time - 🔧 FIXED COMPILATION ERRORS
      */
     public String extendParkingTime(String parkingCodeStr, int additionalHours) {
         if (additionalHours < 1 || additionalHours > 4) {
@@ -496,13 +509,18 @@ public class ParkingController {
         
         try {
             int parkingCode = Integer.parseInt(parkingCodeStr);
-            String qry = "SELECT pi.* FROM ParkingInfo pi WHERE pi.Code = ? AND pi.Actual_end_time IS NULL";
             
-            try (PreparedStatement stmt = conn.prepareStatement(qry)) {
+            // 🔧 FIXED: Get user info for email notification
+            String getUserQry = "SELECT pi.*, u.Email, u.Name FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID WHERE pi.Code = ? AND pi.Actual_end_time IS NULL";
+            
+            try (PreparedStatement stmt = conn.prepareStatement(getUserQry)) {
                 stmt.setInt(1, parkingCode);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
                         Time currentEstimatedEnd = rs.getTime("Estimated_end_time");
+                        String userEmail = rs.getString("Email");
+                        String userName = rs.getString("Name");
+                        
                         LocalTime newEstimatedEnd = currentEstimatedEnd.toLocalTime().plusHours(additionalHours);
                         
                         String updateQry = "UPDATE ParkingInfo SET Estimated_end_time = ?, IsExtended = true WHERE Code = ?";
@@ -511,6 +529,14 @@ public class ParkingController {
                             updateStmt.setTime(1, Time.valueOf(newEstimatedEnd));
                             updateStmt.setInt(2, parkingCode);
                             updateStmt.executeUpdate();
+                            
+                            // 🆕 SEND EMAIL NOTIFICATION
+                            if (userEmail != null && userName != null) {
+                                EmailService.sendExtensionConfirmation(
+                                    userEmail, userName, parkingCodeStr, 
+                                    additionalHours, newEstimatedEnd.toString()
+                                );
+                            }
                             
                             return "Parking time extended by " + additionalHours + " hours until " + newEstimatedEnd;
                         }
@@ -526,10 +552,10 @@ public class ParkingController {
     }
 
     /**
-     * Sends lost parking code to user
+     * Sends lost parking code to user - 🔧 FIXED COMPILATION ERRORS
      */
     public String sendLostParkingCode(String userName) {
-        String qry = "SELECT pi.Code, u.Email, u.Phone FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID WHERE u.UserName = ? AND pi.Actual_end_time IS NULL";
+        String qry = "SELECT pi.Code, u.Email, u.Phone, u.Name FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID WHERE u.UserName = ? AND pi.Actual_end_time IS NULL";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
             stmt.setString(1, userName);
@@ -538,9 +564,10 @@ public class ParkingController {
                     int parkingCode = rs.getInt("Code");
                     String email = rs.getString("Email");
                     String phone = rs.getString("Phone");
+                    String name = rs.getString("Name"); // 🔧 FIXED: Now getting name from query
                     
-                    // Simulate sending email/SMS
-                    System.out.println("Sending parking code " + parkingCode + " to email: " + email + " and phone: " + phone);
+                    // 🆕 SEND EMAIL NOTIFICATION
+                    EmailService.sendParkingCodeRecovery(email, name, String.valueOf(parkingCode));
                     
                     return String.valueOf(parkingCode);
                 }
@@ -668,9 +695,26 @@ public class ParkingController {
     }
 
     /**
-     * Cancels a reservation - NOW SUPPORTS ALL STATUSES
+     * Cancels a reservation - 🔧 FIXED COMPILATION ERRORS
      */
     public String cancelReservation(int reservationCode) {
+        // 🔧 FIXED: Get user info before cancelling for email notification
+        String getUserQry = "SELECT u.Email, u.Name FROM Reservations r JOIN users u ON r.User_ID = u.User_ID WHERE r.Reservation_code = ?";
+        String userEmail = null;
+        String userName = null;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(getUserQry)) {
+            stmt.setInt(1, reservationCode);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    userEmail = rs.getString("Email");
+                    userName = rs.getString("Name");
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Error getting user info for cancellation: " + e.getMessage());
+        }
+        
         String qry = "UPDATE Reservations SET statusEnum = 'cancelled' WHERE Reservation_code = ? AND statusEnum IN ('preorder', 'active')";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
@@ -680,6 +724,12 @@ public class ParkingController {
             if (rowsUpdated > 0) {
                 // Also free up the spot if it was assigned
                 freeSpotForReservation(reservationCode);
+                
+                // 🆕 SEND EMAIL NOTIFICATION
+                if (userEmail != null && userName != null) {
+                    EmailService.sendReservationCancelled(userEmail, userName, String.valueOf(reservationCode));
+                }
+                
                 return "Reservation cancelled successfully";
             }
         } catch (SQLException e) {
@@ -801,8 +851,10 @@ public class ParkingController {
         }
     }
 
+    /**
+     * Send late exit notification - 🔧 FIXED: Now uses EmailService
+     */
     private void sendLateExitNotification(int userID) {
-        // Simulate sending email/SMS notification
         String qry = "SELECT Email, Phone, Name FROM users WHERE User_ID = ?";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
@@ -813,8 +865,8 @@ public class ParkingController {
                     String phone = rs.getString("Phone");
                     String name = rs.getString("Name");
                     
-                    System.out.println("Sending late exit notification to " + name + 
-                                     " at email: " + email + " and phone: " + phone);
+                    // 🆕 SEND EMAIL NOTIFICATION
+                    EmailService.sendLatePickupNotification(email, name);
                 }
             }
         } catch (SQLException e) {

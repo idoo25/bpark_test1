@@ -10,10 +10,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import services.EmailService; // 🆕 ADD THIS IMPORT
+
 /**
  * Simplified Automatic Reservation Cancellation Service
  * 15-minute rule: If a customer with "preorder" status is late by more than 15 minutes,
  * their reservation is automatically cancelled and the spot becomes available.
+ * NOW INCLUDES EMAIL NOTIFICATIONS
  */
 public class SimpleAutoCancellationService {
     
@@ -66,6 +69,7 @@ public class SimpleAutoCancellationService {
     
     /**
      * Main method that checks for and cancels late preorder reservations
+     * 🆕 NOW WITH EMAIL NOTIFICATIONS
      */
     private void checkAndCancelLatePreorders() {
         String query = """
@@ -75,6 +79,7 @@ public class SimpleAutoCancellationService {
                 r.assigned_parking_spot_id,
                 u.UserName,
                 u.Email,
+                u.Name,
                 u.Phone,
                 TIMESTAMPDIFF(MINUTE, 
                     CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
@@ -99,12 +104,20 @@ public class SimpleAutoCancellationService {
                     int reservationCode = rs.getInt("Reservation_code");
                     int spotId = rs.getInt("assigned_parking_spot_id");
                     String userName = rs.getString("UserName");
+                    String userEmail = rs.getString("Email");
+                    String fullName = rs.getString("Name");
                     int minutesLate = rs.getInt("minutes_late");
                     
                     if (cancelLateReservation(reservationCode, spotId)) {
                         cancelledCount++;
+                        
+                        // 🆕 SEND EMAIL NOTIFICATION for auto-cancellation
+                        if (userEmail != null && fullName != null) {
+                            EmailService.sendReservationCancelled(userEmail, fullName, String.valueOf(reservationCode));
+                        }
+                        
                         System.out.println(String.format(
-                            "✅ AUTO-CANCELLED: Reservation %d for %s (Spot %d) - %d minutes late",
+                            "✅ AUTO-CANCELLED: Reservation %d for %s (Spot %d) - %d minutes late - Email sent",
                             reservationCode, userName, spotId, minutesLate
                         ));
                     }
@@ -112,8 +125,8 @@ public class SimpleAutoCancellationService {
                 
                 if (cancelledCount > 0) {
                     System.out.println(String.format(
-                        "Auto-cancellation completed: %d preorder reservations cancelled, %d spots freed",
-                        cancelledCount, cancelledCount
+                        "Auto-cancellation completed: %d preorder reservations cancelled, %d spots freed, %d emails sent",
+                        cancelledCount, cancelledCount, cancelledCount
                     ));
                 }
             }
