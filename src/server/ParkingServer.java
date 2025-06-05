@@ -18,8 +18,8 @@ import controllers.ReportController;
 import entities.Message;
 import entities.Message.MessageType;
 import entities.ParkingOrder;
-import entities.ParkingSubscriber;
 import entities.ParkingReport;
+import entities.ParkingSubscriber;
 import ocsf.server.AbstractServer;
 import ocsf.server.ConnectionToClient;
 import serverGUI.ServerPortFrame;
@@ -143,74 +143,45 @@ public class ParkingServer extends AbstractServer {
                 
             case RESERVE_PARKING:
                 String[] reservationData = ((String) message.getContent()).split(",");
-                String userName = reservationData[0];
+                String reservationUserName = reservationData[0]; // ← RENAMED
                 String reservationDate = reservationData[1];
-                String reservationResult = parkingController.makeReservation(userName, reservationDate);
+                String reservationResult = parkingController.makeReservation(reservationUserName, reservationDate);
                 ret = new Message(MessageType.RESERVATION_RESPONSE, reservationResult);
                 client.sendToClient(serialize(ret));
                 break;
-                
+
             case REGISTER_SUBSCRIBER:
+                // Expected format: "attendantUserName,name,phone,email,carNumber,userName"
                 String registrationData = (String) message.getContent();
                 String[] regParts = registrationData.split(",");
                 
-                if (regParts.length >= 5) {
-                    // Format: name,phone,email,carNumber,userName
+                if (regParts.length >= 6) {
+                    String attendantUserName = regParts[0].trim();
+                    String name = regParts[1].trim();
+                    String phone = regParts[2].trim();
+                    String email = regParts[3].trim();
+                    String carNumber = regParts[4].trim();
+                    String subscriberUserName = regParts[5].trim(); // ← RENAMED
+                    
                     String registrationResult = parkingController.registerNewSubscriber(
-                        regParts[0].trim(), 
-                        regParts[1].trim(), 
-                        regParts[2].trim(), 
-                        regParts[3].trim(), 
-                        regParts[4].trim()
-                    );
+                        attendantUserName, name, phone, email, carNumber, subscriberUserName);
                     ret = new Message(MessageType.REGISTRATION_RESPONSE, registrationResult);
                 } else {
-                    ret = new Message(MessageType.REGISTRATION_RESPONSE, "Invalid registration data format");
+                    ret = new Message(MessageType.REGISTRATION_RESPONSE, "ERROR: Invalid registration data format");
                 }
                 client.sendToClient(serialize(ret));
                 break;
-                
-            case GENERATE_USERNAME:
-                String baseName = (String) message.getContent();
-                String generatedUsername = parkingController.generateUniqueUsername(baseName);
-                ret = new Message(MessageType.USERNAME_RESPONSE, generatedUsername);
-                client.sendToClient(serialize(ret));
-                break;    
-                
-                
-            case ENTER_PARKING:
-                String enterData = (String) message.getContent();
-                String enterResult = parkingController.enterParking(enterData);
-                ret = new Message(MessageType.ENTER_PARKING_RESPONSE, enterResult);
-                client.sendToClient(serialize(ret));
-                break;
-                
-            case EXIT_PARKING:
-                String exitData = (String) message.getContent();
-                String exitResult = parkingController.exitParking(exitData);
-                ret = new Message(MessageType.EXIT_PARKING_RESPONSE, exitResult);
-                client.sendToClient(serialize(ret));
-                break;
-                
-            case EXTEND_PARKING:
-                String[] extendData = ((String) message.getContent()).split(",");
-                String parkingCode = extendData[0];
-                int additionalHours = Integer.parseInt(extendData[1]);
-                String extendResult = parkingController.extendParkingTime(parkingCode, additionalHours);
-                ret = new Message(MessageType.EXTEND_PARKING_RESPONSE, extendResult);
-                client.sendToClient(serialize(ret));
-                break;
-                
+
             case REQUEST_LOST_CODE:
-                String userNameForCode = (String) message.getContent();
-                String lostCodeResult = parkingController.sendLostParkingCode(userNameForCode);
+                String lostCodeUserName = (String) message.getContent(); // ← RENAMED
+                String lostCodeResult = parkingController.sendLostParkingCode(lostCodeUserName);
                 ret = new Message(MessageType.LOST_CODE_RESPONSE, lostCodeResult);
                 client.sendToClient(serialize(ret));
                 break;
                 
             case GET_PARKING_HISTORY:
-                String userNameForHistory = (String) message.getContent();
-                ArrayList<ParkingOrder> history = parkingController.getParkingHistory(userNameForHistory);
+                String historyUserName = (String) message.getContent(); // ← RENAMED
+                ArrayList<ParkingOrder> history = parkingController.getParkingHistory(historyUserName);
                 ret = new Message(MessageType.PARKING_HISTORY_RESPONSE, history);
                 client.sendToClient(serialize(ret));
                 break;
@@ -238,6 +209,42 @@ public class ParkingServer extends AbstractServer {
                 String monthYear = (String) message.getContent();
                 ArrayList<ParkingReport> monthlyReports = reportController.generateMonthlyReports(monthYear);
                 ret = new Message(MessageType.MONTHLY_REPORTS_RESPONSE, monthlyReports);
+                client.sendToClient(serialize(ret));
+                break;
+                
+            case ACTIVATE_RESERVATION:
+                // Expected format: "userName,reservationCode"
+                String[] activateData = ((String) message.getContent()).split(",", 2);
+                if (activateData.length != 2) {
+                    ret = new Message(MessageType.ACTIVATION_RESPONSE, "ERROR: Invalid activation data format");
+                } else {
+                    try {
+                        String activateUserName = activateData[0].trim();
+                        int reservationCode = Integer.parseInt(activateData[1].trim());
+                        String activateResult = parkingController.activateReservation(activateUserName, reservationCode);
+                        ret = new Message(MessageType.ACTIVATION_RESPONSE, activateResult);
+                    } catch (NumberFormatException e) {
+                        ret = new Message(MessageType.ACTIVATION_RESPONSE, "ERROR: Invalid reservation code format");
+                    }
+                }
+                client.sendToClient(serialize(ret));
+                break;
+                
+            case CANCEL_RESERVATION:
+                // Expected format: "userName,reservationCode"
+                String[] cancelData = ((String) message.getContent()).split(",", 2);
+                if (cancelData.length != 2) {
+                    ret = new Message(MessageType.CANCELLATION_RESPONSE, "ERROR: Invalid cancellation data format");
+                } else {
+                    try {
+                        String cancelUserName = cancelData[0].trim();
+                        int reservationCode = Integer.parseInt(cancelData[1].trim());
+                        String cancelResult = parkingController.cancelReservation(cancelUserName, reservationCode);
+                        ret = new Message(MessageType.CANCELLATION_RESPONSE, cancelResult);
+                    } catch (NumberFormatException e) {
+                        ret = new Message(MessageType.CANCELLATION_RESPONSE, "ERROR: Invalid reservation code format");
+                    }
+                }
                 client.sendToClient(serialize(ret));
                 break;
                 

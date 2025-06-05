@@ -189,7 +189,24 @@ public class Message implements Serializable {
         /**
          * System status response
          */
-        SYSTEM_STATUS_RESPONSE
+        SYSTEM_STATUS_RESPONSE,
+        
+        /**
+         * Activate reservation when arriving
+         */
+        ACTIVATE_RESERVATION,
+        /**
+         * Activation response
+         */
+        ACTIVATION_RESPONSE,
+        /**
+         * Cancel reservation
+         */
+        CANCEL_RESERVATION,
+        /**
+         * Cancellation response  
+         */
+        CANCELLATION_RESPONSE
     }
 
     // Constructors ******************************************************

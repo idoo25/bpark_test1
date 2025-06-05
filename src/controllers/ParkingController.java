@@ -1,16 +1,16 @@
 package controllers;
 
 import java.sql.Connection;
+import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.sql.Date;
 import java.sql.Time;
-import java.time.LocalDateTime;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Random;
 
@@ -27,6 +27,74 @@ public class ParkingController {
     public int successFlag;
     private static final int TOTAL_PARKING_SPOTS = 100;
     private static final double RESERVATION_THRESHOLD = 0.4;
+    /**
+     * Role-based access control for all parking operations
+     */
+    public enum UserRole {
+        SUBSCRIBER("sub"),
+        ATTENDANT("emp"), 
+        MANAGER("mng");
+        
+        private final String dbValue;
+        
+        UserRole(String dbValue) {
+            this.dbValue = dbValue;
+        }
+        
+        public String getDbValue() {
+            return dbValue;
+        }
+        
+        public static UserRole fromDbValue(String dbValue) {
+            for (UserRole role : values()) {
+                if (role.dbValue.equals(dbValue)) {
+                    return role;
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Get user role from database
+     */
+    private UserRole getUserRole(String userName) {
+        String qry = "SELECT UserTypeEnum FROM users WHERE UserName = ?";
+        
+        try (PreparedStatement stmt = conn.prepareStatement(qry)) {
+            stmt.setString(1, userName);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    String userType = rs.getString("UserTypeEnum");
+                    return UserRole.fromDbValue(userType);
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Error getting user role: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Check if user has required role for operation
+     */
+    private boolean hasRole(String userName, UserRole requiredRole) {
+        UserRole userRole = getUserRole(userName);
+        return userRole == requiredRole;
+    }
+
+    /**
+     * Check if user has any of the required roles
+     */
+    private boolean hasAnyRole(String userName, UserRole... requiredRoles) {
+        UserRole userRole = getUserRole(userName);
+        if (userRole == null) return false;
+        
+        for (UserRole role : requiredRoles) {
+            if (userRole == role) return true;
+        }
+        return false;
+    }
     
     // Auto-cancellation service
     private SimpleAutoCancellationService autoCancellationService;
@@ -167,23 +235,26 @@ public class ParkingController {
     }
 
     /**
-     * Makes a parking reservation - NOW CREATES PREORDER STATUS WITH EMAIL
+     * Makes a parking reservation with specific DATE and TIME
+     * Format: "YYYY-MM-DD HH:MM" or "YYYY-MM-DD HH:MM:SS"
      */
-    public String makeReservation(String userName, String reservationDateStr) {
-        // Check if reservation is possible
+    public String makeReservation(String userName, String reservationDateTimeStr) {
+        // Check if reservation is possible (40% rule)
         if (!canMakeReservation()) {
             return "Not enough available spots for reservation (need 40% available)";
         }
 
         try {
-            Date reservationDate = Date.valueOf(reservationDateStr);
+            // Parse the datetime string
+            LocalDateTime reservationDateTime = parseDateTime(reservationDateTimeStr);
             
-            // Check if reservation is within valid time range (24 hours to 7 days)
-            LocalDate today = LocalDate.now();
-            LocalDate resDate = reservationDate.toLocalDate();
-            
-            if (resDate.isBefore(today.plusDays(1)) || resDate.isAfter(today.plusDays(7))) {
-                return "Reservation must be between 24 hours and 7 days in advance";
+            // Validate reservation is within allowed time range (24 hours to 7 days)
+            LocalDateTime now = LocalDateTime.now();
+            if (reservationDateTime.isBefore(now.plusHours(24))) {
+                return "Reservation must be at least 24 hours in advance";
+            }
+            if (reservationDateTime.isAfter(now.plusDays(7))) {
+                return "Reservation cannot be more than 7 days in advance";
             }
 
             // Get user ID
@@ -198,43 +269,81 @@ public class ParkingController {
                 return "No available parking spots";
             }
 
-            // CHANGED: Now creates 'preorder' status instead of 'active'
-            String qry = "INSERT INTO Reservations (User_ID, parking_ID, reservation_Date, Date_Of_Placing_Order, statusEnum, assigned_parking_spot_id) VALUES (?, ?, ?, ?, 'preorder', ?)";
+            // Calculate end time (default 4 hours)
+            LocalDateTime estimatedEndTime = reservationDateTime.plusHours(4);
+
+            // Create reservation with DATETIME
+            String qry = """
+                INSERT INTO Reservations 
+                (User_ID, parking_ID, reservation_Date, reservation_start_time, reservation_end_time,
+                 Date_Of_Placing_Order, statusEnum, assigned_parking_spot_id) 
+                VALUES (?, ?, ?, ?, ?, NOW(), 'preorder', ?)
+                """;
             
             try (PreparedStatement stmt = conn.prepareStatement(qry, PreparedStatement.RETURN_GENERATED_KEYS)) {
                 stmt.setInt(1, userID);
                 stmt.setInt(2, parkingSpotID);
-                stmt.setDate(3, reservationDate);
-                stmt.setDate(4, Date.valueOf(LocalDate.now()));
-                stmt.setInt(5, parkingSpotID);
+                stmt.setDate(3, Date.valueOf(reservationDateTime.toLocalDate()));
+                stmt.setTime(4, Time.valueOf(reservationDateTime.toLocalTime()));
+                stmt.setTime(5, Time.valueOf(estimatedEndTime.toLocalTime()));
+                stmt.setInt(6, parkingSpotID);
                 stmt.executeUpdate();
                 
                 // Get the generated reservation code
                 try (ResultSet generatedKeys = stmt.getGeneratedKeys()) {
                     if (generatedKeys.next()) {
                         int reservationCode = generatedKeys.getInt(1);
-                        System.out.println("New preorder reservation created: " + reservationCode + " (15-min auto-cancel rule applies)");
+                        System.out.println("New preorder reservation created: " + reservationCode + 
+                                         " for " + reservationDateTime + " (15-min auto-cancel rule applies)");
                         
-                        // 🆕 SEND EMAIL CONFIRMATION
+                        // Send email confirmation
                         ParkingSubscriber user = getUserInfo(userName);
                         if (user != null && user.getEmail() != null) {
+                            String formattedDateTime = reservationDateTime.format(
+                                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
                             EmailService.sendReservationConfirmation(
                                 user.getEmail(), user.getFirstName(), 
-                                String.valueOf(reservationCode), reservationDateStr, "Spot " + parkingSpotID
+                                String.valueOf(reservationCode), formattedDateTime, "Spot " + parkingSpotID
                             );
                         }
                         
-                        return "Reservation confirmed. Confirmation code: " + reservationCode;
+                        return "Reservation confirmed for " + reservationDateTime.format(
+                            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) + 
+                            ". Confirmation code: " + reservationCode;
                     }
                 }
             }
-        } catch (IllegalArgumentException e) {
-            return "Invalid date format. Use YYYY-MM-DD";
-        } catch (SQLException e) {
+        } catch (Exception e) {
             System.out.println("Error making reservation: " + e.getMessage());
-            return "Reservation failed";
+            return "Reservation failed: " + e.getMessage();
         }
         return "Reservation failed";
+    }
+
+    /**
+     * Parse datetime string in various formats
+     */
+    private LocalDateTime parseDateTime(String dateTimeStr) {
+        try {
+            // Try "YYYY-MM-DD HH:MM:SS" format first
+            if (dateTimeStr.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")) {
+                return LocalDateTime.parse(dateTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            }
+            // Try "YYYY-MM-DD HH:MM" format
+            else if (dateTimeStr.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}")) {
+                return LocalDateTime.parse(dateTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+            }
+            // Try ISO format "YYYY-MM-DDTHH:MM"
+            else if (dateTimeStr.contains("T")) {
+                return LocalDateTime.parse(dateTimeStr);
+            }
+            else {
+                throw new IllegalArgumentException("Unsupported datetime format: " + dateTimeStr);
+            }
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid datetime format: " + dateTimeStr + 
+                                             ". Use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS'");
+        }
     }
 
     /**
@@ -356,9 +465,24 @@ public class ParkingController {
     }
     
     /**
+     * ATTENDANT-ONLY: Register new subscriber (PDF requirement)
+     * Only attendants can register new users
+     */
+    public String registerNewSubscriber(String attendantUserName, String name, String phone, 
+                                       String email, String carNumber, String userName) {
+        // Verify caller is attendant
+        if (!hasRole(attendantUserName, UserRole.ATTENDANT)) {
+            return "ERROR: Only parking attendants can register new subscribers";
+        }
+        
+        // Continue with existing registration logic
+        return registerNewSubscriberInternal(name, phone, email, carNumber, userName);
+    }
+    
+    /**
      * Registers a new subscriber in the system - WITH EMAIL NOTIFICATIONS
      */
-    public String registerNewSubscriber(String name, String phone, String email, String carNumber, String userName) {
+    private String registerNewSubscriberInternal(String name, String phone, String email, String carNumber, String userName) {
         // Validate input
         if (name == null || name.trim().isEmpty()) {
             return "Name is required";
@@ -929,4 +1053,152 @@ public class ParkingController {
             System.out.println("Error freeing spot for reservation: " + e.getMessage());
         }
     }
+    /**
+     * Activate reservation when customer arrives (PREORDER → ACTIVE)
+     */
+    public String activateReservation(String subscriberUserName, int reservationCode) {
+        // Check if reservation exists and is in preorder status
+        String checkQry = """
+            SELECT r.*, u.UserName, r.assigned_parking_spot_id,
+                   TIMESTAMPDIFF(MINUTE, 
+                       CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
+                       NOW()) as minutes_since_start
+            FROM Reservations r 
+            JOIN users u ON r.User_ID = u.User_ID 
+            WHERE r.Reservation_code = ? AND r.statusEnum = 'preorder'
+            """;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(checkQry)) {
+            stmt.setInt(1, reservationCode);
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    int minutesSinceStart = rs.getInt("minutes_since_start");
+                    int spotId = rs.getInt("assigned_parking_spot_id");
+                    
+                    // Check if within 15-minute grace period
+                    if (minutesSinceStart > 15) {
+                        // Too late - auto-cancel
+                        cancelReservation(subscriberUserName, reservationCode);
+                        return "Reservation cancelled due to late arrival (over 15 minutes). Please make a new reservation.";
+                    }
+                    
+                    // Generate parking code and create parking session
+                    int parkingCode = generateParkingCode();
+                    LocalDateTime now = LocalDateTime.now();
+                    LocalDateTime estimatedEnd = now.plusHours(4); // Default 4 hours
+                    
+                    // Create parking info record
+                    String insertQry = """
+                        INSERT INTO ParkingInfo 
+                        (ParkingSpot_ID, User_ID, Date, Code, Actual_start_time, Estimated_start_time, 
+                         Estimated_end_time, IsOrderedEnum, IsLate, IsExtended) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'ordered', ?, false)
+                        """;
+                    
+                    try (PreparedStatement insertStmt = conn.prepareStatement(insertQry)) {
+                        insertStmt.setInt(1, spotId);
+                        insertStmt.setInt(2, rs.getInt("User_ID"));
+                        insertStmt.setDate(3, Date.valueOf(now.toLocalDate()));
+                        insertStmt.setInt(4, parkingCode);
+                        insertStmt.setTime(5, Time.valueOf(now.toLocalTime()));
+                        insertStmt.setTime(6, Time.valueOf(now.toLocalTime()));
+                        insertStmt.setTime(7, Time.valueOf(estimatedEnd.toLocalTime()));
+                        insertStmt.setBoolean(8, minutesSinceStart > 0); // Mark as late if any delay
+                        insertStmt.executeUpdate();
+                        
+                        // Update reservation status to ACTIVE
+                        updateReservationStatus(reservationCode, "active");
+                        
+                        // Mark parking spot as occupied
+                        updateParkingSpotStatus(spotId, true);
+                        
+                        String lateMessage = minutesSinceStart > 0 ? 
+                            " (Note: " + minutesSinceStart + " minutes late)" : "";
+                        
+                        System.out.println("Reservation " + reservationCode + " activated (preorder → active)" + lateMessage);
+                        
+                        return "Reservation activated! Parking code: " + parkingCode + 
+                               ". Spot: " + spotId + lateMessage;
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Error activating reservation: " + e.getMessage());
+            return "Failed to activate reservation";
+        }
+        
+        return "Reservation not found or already activated";
+    }
+
+    /**
+     * Cancel reservation
+     */
+    public String cancelReservation(String subscriberUserName, int reservationCode) {
+        return cancelReservationInternal(reservationCode, "User requested cancellation");
+    }
+
+    /**
+     * Internal cancellation method (used by auto-cancel and manual cancel)
+     */
+    private String cancelReservationInternal(int reservationCode, String reason) {
+        // Get reservation info first for email notification
+        String getUserQry = """
+            SELECT u.Email, u.Name, r.statusEnum, r.assigned_parking_spot_id
+            FROM Reservations r 
+            JOIN users u ON r.User_ID = u.User_ID 
+            WHERE r.Reservation_code = ?
+            """;
+        
+        String userEmail = null;
+        String userName = null;
+        String currentStatus = null;
+        Integer spotId = null;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(getUserQry)) {
+            stmt.setInt(1, reservationCode);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    userEmail = rs.getString("Email");
+                    userName = rs.getString("Name");
+                    currentStatus = rs.getString("statusEnum");
+                    spotId = rs.getObject("assigned_parking_spot_id", Integer.class);
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Error getting reservation info for cancellation: " + e.getMessage());
+        }
+        
+        // Update reservation status to cancelled
+        String qry = "UPDATE Reservations SET statusEnum = 'cancelled' WHERE Reservation_code = ? AND statusEnum IN ('preorder', 'active')";
+        
+        try (PreparedStatement stmt = conn.prepareStatement(qry)) {
+            stmt.setInt(1, reservationCode);
+            int rowsUpdated = stmt.executeUpdate();
+            
+            if (rowsUpdated > 0) {
+                // Free up the spot if it was assigned
+                if (spotId != null) {
+                    updateParkingSpotStatus(spotId, false);
+                }
+                
+                // Send email notification
+                if (userEmail != null && userName != null) {
+                    EmailService.sendReservationCancelled(userEmail, userName, String.valueOf(reservationCode));
+                }
+                
+                System.out.println("Reservation " + reservationCode + " cancelled (" + currentStatus + " → cancelled) - " + reason);
+                return "Reservation cancelled successfully";
+            }
+        } catch (SQLException e) {
+            System.out.println("Error cancelling reservation: " + e.getMessage());
+        }
+        
+        return "Reservation not found or already cancelled/finished";
+    }
+
+    /**
+     * Update reservation status helper method
+     */
+    
 }

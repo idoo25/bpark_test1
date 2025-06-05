@@ -72,27 +72,29 @@ public class SimpleAutoCancellationService {
      * 🆕 NOW WITH EMAIL NOTIFICATIONS
      */
     private void checkAndCancelLatePreorders() {
-        String query = """
-            SELECT 
-                r.Reservation_code,
-                r.User_ID,
-                r.assigned_parking_spot_id,
-                u.UserName,
-                u.Email,
-                u.Name,
-                u.Phone,
-                TIMESTAMPDIFF(MINUTE, 
-                    CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
-                    NOW()) as minutes_late
-            FROM Reservations r
-            JOIN users u ON r.User_ID = u.User_ID
-            WHERE r.statusEnum = 'preorder'
-            AND r.reservation_Date = CURDATE()
-            AND r.assigned_parking_spot_id IS NOT NULL
-            AND TIMESTAMPDIFF(MINUTE, 
-                CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
-                NOW()) >= ?
-            """;
+    	String query = """
+    		    SELECT 
+    		        r.Reservation_code,
+    		        r.User_ID,
+    		        r.assigned_parking_spot_id,
+    		        u.UserName,
+    		        u.Email,
+    		        u.Name,
+    		        u.Phone,
+    		        TIMESTAMPDIFF(MINUTE, 
+    		            CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
+    		            NOW()) as minutes_late,
+    		        CONCAT(r.reservation_Date, ' ', r.reservation_start_time) as full_reservation_time
+    		    FROM Reservations r
+    		    JOIN users u ON r.User_ID = u.User_ID
+    		    WHERE r.statusEnum = 'preorder'
+    		    AND r.reservation_Date = CURDATE()
+    		    AND r.assigned_parking_spot_id IS NOT NULL
+    		    AND r.reservation_start_time IS NOT NULL
+    		    AND TIMESTAMPDIFF(MINUTE, 
+    		        CONCAT(r.reservation_Date, ' ', r.reservation_start_time), 
+    		        NOW()) >= ?
+    		    """;
         
         try (PreparedStatement stmt = parkingController.getConnection().prepareStatement(query)) {
             stmt.setInt(1, LATE_THRESHOLD_MINUTES);
