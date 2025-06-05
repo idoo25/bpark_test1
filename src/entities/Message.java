@@ -148,7 +148,48 @@ public class Message implements Serializable {
         /**
          * Monthly reports response
          */
-        MONTHLY_REPORTS_RESPONSE
+        MONTHLY_REPORTS_RESPONSE,
+        
+        /**
+         * Get available time slots for a date/time (15-minute precision)
+         */
+        GET_TIME_SLOTS,
+        /**
+         * Time slots response
+         */
+        TIME_SLOTS_RESPONSE,
+        /**
+         * Make pre-booking reservation (DATETIME format)
+         */
+        MAKE_PREBOOKING,
+        /**
+         * Pre-booking response
+         */
+        PREBOOKING_RESPONSE,
+        /**
+         * Spontaneous parking entry (immediate spot assignment)
+         */
+        SPONTANEOUS_PARKING,
+        /**
+         * Spontaneous parking response
+         */
+        SPONTANEOUS_RESPONSE,
+        /**
+         * Request parking extension (during last hour)
+         */
+        REQUEST_EXTENSION,
+        /**
+         * Extension response
+         */
+        EXTENSION_RESPONSE,
+        /**
+         * Get system status
+         */
+        GET_SYSTEM_STATUS,
+        /**
+         * System status response
+         */
+        SYSTEM_STATUS_RESPONSE
     }
 
     // Constructors ******************************************************

@@ -26,7 +26,7 @@ import serverGUI.ServerPortFrame;
 
 /**
  * ParkingServer - Main server for the ParkB automatic parking management system
- * Follows the exact pattern from your EchoServer implementation
+ * Now includes auto-cancellation service shutdown
  */
 public class ParkingServer extends AbstractServer {
     // Class variables *************************************************
@@ -375,9 +375,17 @@ public class ParkingServer extends AbstractServer {
     /**
      * This method overrides the one in the superclass. Called when the server stops
      * listening for connections.
+     * MODIFIED: Now includes auto-cancellation service shutdown
      */
     protected void serverStopped() {
         System.out.println("ParkB Server has stopped listening for connections.");
+        
+        // Stop auto-cancellation service cleanly
+        if (parkingController != null) {
+            parkingController.shutdown();
+            System.out.println("Auto-cancellation service shut down successfully");
+        }
+        
         if (connectionPoolTimer != null) {
             connectionPoolTimer.shutdown();
         }
@@ -475,8 +483,14 @@ public class ParkingServer extends AbstractServer {
     
     /**
      * Shutdown the server properly
+     * MODIFIED: Now includes auto-cancellation service shutdown
      */
     public synchronized void shutdown() {
+        // Stop auto-cancellation service first
+        if (parkingController != null) {
+            parkingController.shutdown();
+        }
+        
         if (connectionPoolTimer != null) {
             connectionPoolTimer.shutdown();
         }

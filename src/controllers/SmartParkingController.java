@@ -11,37 +11,40 @@ import java.sql.Time;
 import java.time.LocalDateTime;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.Duration;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Random;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import entities.ParkingOrder;
 import entities.ParkingSubscriber;
 
 /**
- * Enhanced ParkingController with auto-cancellation service
- * Handles all database operations for the ParkB parking management system.
+ * Smart Parking Allocation System with enhanced algorithms
+ * Combines all existing ParkingController functionality with new smart features
  */
-public class ParkingController {
+public class SmartParkingController {
+    
+    // Configuration constants
+    private static final int TOTAL_PARKING_SPOTS = 100;
+    private static final double AVAILABILITY_THRESHOLD = 0.4; // 40% rule
+    private static final int PREFERRED_WINDOW_HOURS = 8;
+    private static final int STANDARD_BOOKING_HOURS = 4;
+    private static final int MINIMUM_SPONTANEOUS_HOURS = 2;
+    private static final int TIME_SLOT_MINUTES = 15; // 15-minute precision
+    private static final int DISPLAY_WINDOW_HOURS = 1; // ±1 hour around selected time
+    private static final int MINIMUM_EXTENSION_HOURS = 2;
+    private static final int MAXIMUM_EXTENSION_HOURS = 4;
+    
     protected Connection conn;
     public int successFlag;
-    private static final int TOTAL_PARKING_SPOTS = 100;
-    private static final double RESERVATION_THRESHOLD = 0.4;
-    
-    // Auto-cancellation service
-    private SimpleAutoCancellationService autoCancellationService;
 
-    public ParkingController(String dbname, String pass) {
+    public SmartParkingController(String dbname, String pass) {
         String connectPath = "jdbc:mysql://localhost/" + dbname + "?serverTimezone=IST";
         connectToDB(connectPath, pass);
-        
-        // Initialize auto-cancellation service after DB connection
-        if (successFlag == 1) {
-            this.autoCancellationService = new SimpleAutoCancellationService(this);
-            startAutoCancellationService();
-        }
     }
 
     public Connection getConnection() {
@@ -68,36 +71,56 @@ public class ParkingController {
         }
     }
 
+    // ========== CORE DATA STRUCTURES ==========
+    
     /**
-     * Start the automatic reservation cancellation service
+     * Represents a 15-minute time slot availability
      */
-    public void startAutoCancellationService() {
-        if (autoCancellationService != null) {
-            autoCancellationService.startService();
-            System.out.println("✅ Auto-cancellation service started - monitoring preorder reservations");
+    public static class TimeSlot {
+        public LocalDateTime startTime;
+        public boolean isAvailable;
+        public int availableSpots;
+        public boolean meetsFortyPercentRule;
+        
+        public TimeSlot(LocalDateTime startTime, boolean isAvailable, int availableSpots, boolean meetsFortyPercentRule) {
+            this.startTime = startTime;
+            this.isAvailable = isAvailable;
+            this.availableSpots = availableSpots;
+            this.meetsFortyPercentRule = meetsFortyPercentRule;
+        }
+        
+        public String getFormattedTime() {
+            return startTime.format(DateTimeFormatter.ofPattern("HH:mm"));
+        }
+    }
+    
+    /**
+     * Represents parking spot availability window
+     */
+    public static class SpotAvailability {
+        public int spotId;
+        public LocalDateTime availableFrom;
+        public LocalDateTime availableUntil;
+        public long availabilityDurationHours;
+        
+        public SpotAvailability(int spotId, LocalDateTime from, LocalDateTime until) {
+            this.spotId = spotId;
+            this.availableFrom = from;
+            this.availableUntil = until;
+            this.availabilityDurationHours = Duration.between(from, until).toHours();
+        }
+        
+        public boolean hasEightHourWindow(LocalDateTime bookingStart) {
+            LocalDateTime eightHourEnd = bookingStart.plusHours(PREFERRED_WINDOW_HOURS);
+            return !bookingStart.isBefore(availableFrom) && !eightHourEnd.isAfter(availableUntil);
+        }
+        
+        public boolean canAccommodateBooking(LocalDateTime bookingStart, LocalDateTime bookingEnd) {
+            return !bookingStart.isBefore(availableFrom) && !bookingEnd.isAfter(availableUntil);
         }
     }
 
-    /**
-     * Stop the automatic reservation cancellation service
-     */
-    public void stopAutoCancellationService() {
-        if (autoCancellationService != null) {
-            autoCancellationService.stopService();
-            System.out.println("⛔ Auto-cancellation service stopped");
-        }
-    }
-
-    /**
-     * Cleanup method - call when shutting down the controller
-     */
-    public void shutdown() {
-        if (autoCancellationService != null) {
-            autoCancellationService.shutdown();
-        }
-    }
-
-    // ========== ALL YOUR EXISTING METHODS ==========
+    // ========== ALL EXISTING PARKINGCONTROLLER METHODS ==========
     
     public String checkLogin(String userName, String password) {
         String qry = "SELECT UserTypeEnum FROM users WHERE UserName = ?";
@@ -114,10 +137,22 @@ public class ParkingController {
         }
         return "None";
     }
-
-    /**
-     * Gets user information by userName
-     */
+    
+    public int getAvailableParkingSpots() {
+        String qry = "SELECT COUNT(*) as available FROM ParkingSpot WHERE isOccupied = false";
+        
+        try (PreparedStatement stmt = conn.prepareStatement(qry)) {
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt("available");
+                }
+            }
+        } catch (SQLException e) {
+            System.out.println("Error getting available spots: " + e.getMessage());
+        }
+        return 0;
+    }
+    
     public ParkingSubscriber getUserInfo(String userName) {
         String qry = "SELECT * FROM users WHERE UserName = ?";
         
@@ -141,46 +176,14 @@ public class ParkingController {
         }
         return null;
     }
-
-    /**
-     * Gets the number of available parking spots
-     */
-    public int getAvailableParkingSpots() {
-        String qry = "SELECT COUNT(*) as available FROM ParkingSpot WHERE isOccupied = false";
-        
-        try (PreparedStatement stmt = conn.prepareStatement(qry)) {
-            try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt("available");
-                }
-            }
-        } catch (SQLException e) {
-            System.out.println("Error getting available spots: " + e.getMessage());
-        }
-        return 0;
-    }
-
-    /**
-     * Checks if reservation is possible (40% of spots must be available)
-     */
-    public boolean canMakeReservation() {
-        int availableSpots = getAvailableParkingSpots();
-        return availableSpots >= (TOTAL_PARKING_SPOTS * RESERVATION_THRESHOLD);
-    }
-
-    /**
-     * Makes a parking reservation - NOW CREATES PREORDER STATUS
-     */
+    
     public String makeReservation(String userName, String reservationDateStr) {
-        // Check if reservation is possible
         if (!canMakeReservation()) {
             return "Not enough available spots for reservation (need 40% available)";
         }
 
         try {
             Date reservationDate = Date.valueOf(reservationDateStr);
-            
-            // Check if reservation is within valid time range (24 hours to 7 days)
             LocalDate today = LocalDate.now();
             LocalDate resDate = reservationDate.toLocalDate();
             
@@ -188,35 +191,29 @@ public class ParkingController {
                 return "Reservation must be between 24 hours and 7 days in advance";
             }
 
-            // Get user ID
             int userID = getUserID(userName);
             if (userID == -1) {
                 return "User not found";
             }
 
-            // Find available parking spot
             int parkingSpotID = getAvailableParkingSpotID();
             if (parkingSpotID == -1) {
                 return "No available parking spots";
             }
 
-            // CHANGED: Now creates 'preorder' status instead of 'active'
-            String qry = "INSERT INTO Reservations (User_ID, parking_ID, reservation_Date, Date_Of_Placing_Order, statusEnum, assigned_parking_spot_id) VALUES (?, ?, ?, ?, 'preorder', ?)";
+            String qry = "INSERT INTO Reservations (User_ID, parking_ID, reservation_Date, Date_Of_Placing_Order, statusEnum) VALUES (?, ?, ?, ?, 'active')";
             
             try (PreparedStatement stmt = conn.prepareStatement(qry, PreparedStatement.RETURN_GENERATED_KEYS)) {
                 stmt.setInt(1, userID);
                 stmt.setInt(2, parkingSpotID);
                 stmt.setDate(3, reservationDate);
                 stmt.setDate(4, Date.valueOf(LocalDate.now()));
-                stmt.setInt(5, parkingSpotID);
                 stmt.executeUpdate();
                 
-                // Get the generated reservation code
                 try (ResultSet generatedKeys = stmt.getGeneratedKeys()) {
                     if (generatedKeys.next()) {
                         int reservationCode = generatedKeys.getInt(1);
-                        System.out.println("New preorder reservation created: " + reservationCode + " (15-min auto-cancel rule applies)");
-                        return "Reservation confirmed. Code: " + reservationCode + " (Status: PREORDER - will auto-cancel if 15+ min late)";
+                        return "Reservation confirmed. Confirmation code: " + reservationCode;
                     }
                 }
             }
@@ -228,34 +225,26 @@ public class ParkingController {
         }
         return "Reservation failed";
     }
-
-    /**
-     * Handles parking entry with subscriber code (immediate parking)
-     */
+    
     public String enterParking(String userName) {
-        // Get user ID
         int userID = getUserID(userName);
         if (userID == -1) {
             return "Invalid user code";
         }
 
-        // Check if spots are available
         if (getAvailableParkingSpots() <= 0) {
             return "No parking spots available";
         }
 
-        // Find available parking spot
         int spotID = getAvailableParkingSpotID();
         if (spotID == -1) {
             return "No available parking spot found";
         }
 
-        // Generate unique parking code
         int parkingCode = generateParkingCode();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime estimatedEnd = now.plusHours(4); // Default 4 hours
+        LocalDateTime estimatedEnd = now.plusHours(4);
 
-        // Create parking info record
         String qry = "INSERT INTO ParkingInfo (ParkingSpot_ID, User_ID, Date, Code, Actual_start_time, Estimated_start_time, Estimated_end_time, IsOrderedEnum, IsLate, IsExtended) VALUES (?, ?, ?, ?, ?, ?, ?, 'not ordered', false, false)";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
@@ -268,7 +257,6 @@ public class ParkingController {
             stmt.setTime(7, Time.valueOf(estimatedEnd.toLocalTime()));
             stmt.executeUpdate();
 
-            // Mark parking spot as occupied
             updateParkingSpotStatus(spotID, true);
             
             return "Entry successful. Parking code: " + parkingCode + ". Spot: " + spotID;
@@ -277,13 +265,9 @@ public class ParkingController {
             return "Entry failed";
         }
     }
-
-    /**
-     * Handles parking entry with reservation code - NOW SUPPORTS PREORDER->ACTIVE
-     */
+    
     public String enterParkingWithReservation(int reservationCode) {
-        // Check if reservation exists and is in preorder status
-        String checkQry = "SELECT r.*, u.User_ID FROM Reservations r JOIN users u ON r.User_ID = u.User_ID WHERE r.Reservation_code = ? AND r.statusEnum = 'preorder'";
+        String checkQry = "SELECT r.*, u.User_ID FROM Reservations r JOIN users u ON r.User_ID = u.User_ID WHERE r.Reservation_code = ? AND r.statusEnum = 'active'";
         
         try (PreparedStatement stmt = conn.prepareStatement(checkQry)) {
             stmt.setInt(1, reservationCode);
@@ -291,13 +275,11 @@ public class ParkingController {
                 if (rs.next()) {
                     Date reservationDate = rs.getDate("reservation_Date");
                     int userID = rs.getInt("User_ID");
-                    int parkingSpotID = rs.getInt("assigned_parking_spot_id");
+                    int parkingSpotID = rs.getInt("parking_ID");
                     
-                    // Check if reservation is for today
                     LocalDate today = LocalDate.now();
                     if (!reservationDate.toLocalDate().equals(today)) {
                         if (reservationDate.toLocalDate().isBefore(today)) {
-                            // Cancel expired reservation
                             cancelReservation(reservationCode);
                             return "Reservation expired";
                         } else {
@@ -305,21 +287,17 @@ public class ParkingController {
                         }
                     }
 
-                    // Check if spot is still available
                     if (!isParkingSpotAvailable(parkingSpotID)) {
-                        // Find another available spot
                         parkingSpotID = getAvailableParkingSpotID();
                         if (parkingSpotID == -1) {
                             return "No available parking spots found";
                         }
                     }
 
-                    // Generate parking code
                     int parkingCode = generateParkingCode();
                     LocalDateTime now = LocalDateTime.now();
                     LocalDateTime estimatedEnd = now.plusHours(4);
 
-                    // Create parking info record
                     String insertQry = "INSERT INTO ParkingInfo (ParkingSpot_ID, User_ID, Date, Code, Actual_start_time, Estimated_start_time, Estimated_end_time, IsOrderedEnum, IsLate, IsExtended) VALUES (?, ?, ?, ?, ?, ?, ?, 'ordered', false, false)";
                     
                     try (PreparedStatement insertStmt = conn.prepareStatement(insertQry)) {
@@ -332,26 +310,20 @@ public class ParkingController {
                         insertStmt.setTime(7, Time.valueOf(estimatedEnd.toLocalTime()));
                         insertStmt.executeUpdate();
 
-                        // Mark parking spot as occupied and change reservation to active
                         updateParkingSpotStatus(parkingSpotID, true);
-                        updateReservationStatus(reservationCode, "active");
+                        updateReservationStatus(reservationCode, "expire");
                         
-                        System.out.println("Reservation " + reservationCode + " activated (preorder → active)");
-                        return "Entry successful! Reservation activated. Parking code: " + parkingCode + ". Spot: " + parkingSpotID;
+                        return "Entry successful with reservation. Parking code: " + parkingCode + ". Spot: " + parkingSpotID;
                     }
                 }
             }
         } catch (SQLException e) {
             System.out.println("Error handling reservation entry: " + e.getMessage());
         }
-        return "Invalid reservation code or reservation not in preorder status";
+        return "Invalid or expired reservation code";
     }
     
-    /**
-     * Registers a new subscriber in the system
-     */
     public String registerNewSubscriber(String name, String phone, String email, String carNumber, String userName) {
-        // Validate input
         if (name == null || name.trim().isEmpty()) {
             return "Name is required";
         }
@@ -365,7 +337,6 @@ public class ParkingController {
             return "Username is required";
         }
         
-        // Check if username already exists
         String checkQry = "SELECT COUNT(*) FROM users WHERE UserName = ?";
         
         try (PreparedStatement checkStmt = conn.prepareStatement(checkQry)) {
@@ -380,7 +351,6 @@ public class ParkingController {
             return "Error checking username availability";
         }
         
-        // Insert new subscriber
         String insertQry = "INSERT INTO users (UserName, Name, Phone, Email, CarNum, UserTypeEnum) VALUES (?, ?, ?, ?, ?, 'sub')";
         
         try (PreparedStatement stmt = conn.prepareStatement(insertQry)) {
@@ -402,20 +372,14 @@ public class ParkingController {
         
         return "Registration failed: Unknown error";
     }
-
-    /**
-     * Generates a unique subscriber code/username
-     */
+    
     public String generateUniqueUsername(String baseName) {
-        // Remove spaces and special characters
         String cleanName = baseName.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
         
-        // Try the clean name first
         if (isUsernameAvailable(cleanName)) {
             return cleanName;
         }
         
-        // If taken, try with numbers
         for (int i = 1; i <= 999; i++) {
             String candidate = cleanName + i;
             if (isUsernameAvailable(candidate)) {
@@ -423,13 +387,9 @@ public class ParkingController {
             }
         }
         
-        // Fallback to random number
         return cleanName + System.currentTimeMillis() % 10000;
     }
-
-    /**
-     * Handles parking exit - NOW SUPPORTS FINISHING RESERVATIONS
-     */
+    
     public String exitParking(String parkingCodeStr) {
         try {
             int parkingCode = Integer.parseInt(parkingCodeStr);
@@ -443,15 +403,12 @@ public class ParkingController {
                         int spotID = rs.getInt("ParkingSpot_ID");
                         Time estimatedEndTime = rs.getTime("Estimated_end_time");
                         int userID = rs.getInt("User_ID");
-                        String orderType = rs.getString("IsOrderedEnum");
                         
                         LocalTime now = LocalTime.now();
                         LocalTime estimatedEnd = estimatedEndTime.toLocalTime();
                         
-                        // Check if parking exceeded estimated time
                         boolean isLate = now.isAfter(estimatedEnd);
                         
-                        // Update parking info with exit time
                         String updateQry = "UPDATE ParkingInfo SET Actual_end_time = ?, IsLate = ? WHERE ParkingInfo_ID = ?";
                         
                         try (PreparedStatement updateStmt = conn.prepareStatement(updateQry)) {
@@ -460,17 +417,11 @@ public class ParkingController {
                             updateStmt.setInt(3, parkingInfoID);
                             updateStmt.executeUpdate();
                             
-                            // Free the parking spot
                             updateParkingSpotStatus(spotID, false);
-                            
-                            // If this was from a reservation, finish the reservation
-                            if ("ordered".equals(orderType)) {
-                                finishReservationBySpotAndUser(spotID, userID);
-                            }
                             
                             if (isLate) {
                                 sendLateExitNotification(userID);
-                                return "Exit successful. You were late - please arrive on time for future reservations";
+                                return "Exit successful. You were late - notification sent to your email/SMS";
                             }
                             
                             return "Exit successful. Thank you for using ParkB!";
@@ -485,10 +436,7 @@ public class ParkingController {
         }
         return "Invalid parking code or already exited";
     }
-
-    /**
-     * Extends parking time
-     */
+    
     public String extendParkingTime(String parkingCodeStr, int additionalHours) {
         if (additionalHours < 1 || additionalHours > 4) {
             return "Can only extend parking by 1-4 hours";
@@ -524,10 +472,7 @@ public class ParkingController {
         }
         return "Invalid parking code or parking session not active";
     }
-
-    /**
-     * Sends lost parking code to user
-     */
+    
     public String sendLostParkingCode(String userName) {
         String qry = "SELECT pi.Code, u.Email, u.Phone FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID WHERE u.UserName = ? AND pi.Actual_end_time IS NULL";
         
@@ -539,7 +484,6 @@ public class ParkingController {
                     String email = rs.getString("Email");
                     String phone = rs.getString("Phone");
                     
-                    // Simulate sending email/SMS
                     System.out.println("Sending parking code " + parkingCode + " to email: " + email + " and phone: " + phone);
                     
                     return String.valueOf(parkingCode);
@@ -550,10 +494,7 @@ public class ParkingController {
         }
         return "No active parking session found";
     }
-
-    /**
-     * Gets parking history for a user
-     */
+    
     public ArrayList<ParkingOrder> getParkingHistory(String userName) {
         ArrayList<ParkingOrder> history = new ArrayList<>();
         String qry = "SELECT pi.*, ps.ParkingSpot_ID FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID JOIN ParkingSpot ps ON pi.ParkingSpot_ID = ps.ParkingSpot_ID WHERE u.UserName = ? ORDER BY pi.Date DESC, pi.Actual_start_time DESC";
@@ -568,7 +509,6 @@ public class ParkingController {
                     order.setOrderType(rs.getString("IsOrderedEnum"));
                     order.setSpotNumber("Spot " + rs.getInt("ParkingSpot_ID"));
                     
-                    // Convert SQL Date and Time to LocalDateTime
                     Date date = rs.getDate("Date");
                     Time startTime = rs.getTime("Actual_start_time");
                     Time endTime = rs.getTime("Actual_end_time");
@@ -596,10 +536,7 @@ public class ParkingController {
         }
         return history;
     }
-
-    /**
-     * Gets all active parking sessions (for attendant view)
-     */
+    
     public ArrayList<ParkingOrder> getActiveParkings() {
         ArrayList<ParkingOrder> activeParkings = new ArrayList<>();
         String qry = "SELECT pi.*, u.Name, ps.ParkingSpot_ID FROM ParkingInfo pi JOIN users u ON pi.User_ID = u.User_ID JOIN ParkingSpot ps ON pi.ParkingSpot_ID = ps.ParkingSpot_ID WHERE pi.Actual_end_time IS NULL ORDER BY pi.Actual_start_time";
@@ -614,7 +551,6 @@ public class ParkingController {
                     order.setSubscriberName(rs.getString("Name"));
                     order.setSpotNumber("Spot " + rs.getInt("ParkingSpot_ID"));
                     
-                    // Convert SQL Date and Time to LocalDateTime
                     Date date = rs.getDate("Date");
                     Time startTime = rs.getTime("Actual_start_time");
                     Time estimatedEnd = rs.getTime("Estimated_end_time");
@@ -635,12 +571,8 @@ public class ParkingController {
         }
         return activeParkings;
     }
-
-    /**
-     * Updates subscriber information
-     */
+    
     public String updateSubscriberInfo(String updateData) {
-        // Format: userName,phone,email
         String[] data = updateData.split(",");
         if (data.length != 3) {
             return "Invalid update data format";
@@ -666,53 +598,40 @@ public class ParkingController {
         }
         return "Failed to update subscriber information";
     }
-
-    /**
-     * Cancels a reservation - NOW SUPPORTS ALL STATUSES
-     */
+    
     public String cancelReservation(int reservationCode) {
-        String qry = "UPDATE Reservations SET statusEnum = 'cancelled' WHERE Reservation_code = ? AND statusEnum IN ('preorder', 'active')";
+        String qry = "UPDATE Reservations SET statusEnum = 'cancelled' WHERE Reservation_code = ? AND statusEnum = 'active'";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
             stmt.setInt(1, reservationCode);
             int rowsUpdated = stmt.executeUpdate();
             
             if (rowsUpdated > 0) {
-                // Also free up the spot if it was assigned
-                freeSpotForReservation(reservationCode);
                 return "Reservation cancelled successfully";
             }
         } catch (SQLException e) {
             System.out.println("Error cancelling reservation: " + e.getMessage());
         }
-        return "Reservation not found or already cancelled/finished";
+        return "Reservation not found or already cancelled";
     }
-
-    /**
-     * Logs out a user (for future use if needed)
-     */
+    
     public void logoutUser(String userName) {
         System.out.println("User logged out: " + userName);
     }
-
-    /**
-     * Initializes parking spots if they don't exist
-     */
+    
     public void initializeParkingSpots() {
         try {
-            // Check if spots already exist
             String checkQry = "SELECT COUNT(*) FROM ParkingSpot";
             try (PreparedStatement stmt = conn.prepareStatement(checkQry)) {
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next() && rs.getInt(1) == 0) {
-                        // Initialize parking spots - AUTO_INCREMENT will handle ParkingSpot_ID
                         String insertQry = "INSERT INTO ParkingSpot (isOccupied) VALUES (false)";
                         try (PreparedStatement insertStmt = conn.prepareStatement(insertQry)) {
                             for (int i = 1; i <= TOTAL_PARKING_SPOTS; i++) {
                                 insertStmt.executeUpdate();
                             }
                         }
-                        System.out.println("Successfully initialized " + TOTAL_PARKING_SPOTS + " parking spots with AUTO_INCREMENT");
+                        System.out.println("Successfully initialized " + TOTAL_PARKING_SPOTS + " parking spots");
                     } else {
                         System.out.println("Parking spots already exist: " + rs.getInt(1) + " spots found");
                     }
@@ -723,13 +642,456 @@ public class ParkingController {
         }
     }
 
+    // ========== NEW SMART FEATURES ==========
+    
+    /**
+     * Get available 15-minute time slots for a specific date and preferred time
+     */
+    public List<TimeSlot> getAvailableTimeSlots(LocalDate date, LocalTime preferredTime) {
+        List<TimeSlot> timeSlots = new ArrayList<>();
+        
+        try {
+            if (!dateHasValidBookingWindow(date)) {
+                return timeSlots;
+            }
+            
+            LocalDateTime preferredDateTime = LocalDateTime.of(date, preferredTime);
+            LocalDateTime startRange = preferredDateTime.minusHours(DISPLAY_WINDOW_HOURS);
+            LocalDateTime endRange = preferredDateTime.plusHours(DISPLAY_WINDOW_HOURS);
+            
+            LocalDateTime currentSlot = startRange;
+            while (!currentSlot.isAfter(endRange)) {
+                LocalDateTime bookingEnd = currentSlot.plusHours(STANDARD_BOOKING_HOURS);
+                boolean hasValidWindow = hasValidFourHourWindow(currentSlot, bookingEnd);
+                int availableSpots = countAvailableSpotsForWindow(currentSlot, bookingEnd);
+                boolean meetsFortyPercent = availableSpots >= (TOTAL_PARKING_SPOTS * AVAILABILITY_THRESHOLD);
+                
+                timeSlots.add(new TimeSlot(
+                    currentSlot, 
+                    hasValidWindow && meetsFortyPercent, 
+                    availableSpots,
+                    meetsFortyPercent
+                ));
+                
+                currentSlot = currentSlot.plusMinutes(TIME_SLOT_MINUTES);
+            }
+            
+        } catch (Exception e) {
+            System.out.println("Error getting available time slots: " + e.getMessage());
+        }
+        
+        return timeSlots;
+    }
+    
+    /**
+     * Make a pre-booking reservation with 15-minute precision
+     */
+    public String makePreBooking(String userName, String dateTimeStr) {
+        try {
+            LocalDateTime bookingStart = parseDateTime(dateTimeStr);
+            LocalDateTime bookingEnd = bookingStart.plusHours(STANDARD_BOOKING_HOURS);
+            
+            if (bookingStart.getMinute() % TIME_SLOT_MINUTES != 0) {
+                return "Booking time must be in 15-minute intervals (00, 15, 30, 45)";
+            }
+            
+            LocalDateTime now = LocalDateTime.now();
+            if (bookingStart.isBefore(now.plusHours(24))) {
+                return "Pre-booking must be at least 24 hours in advance";
+            }
+            if (bookingStart.isAfter(now.plusDays(7))) {
+                return "Pre-booking cannot be more than 7 days in advance";
+            }
+            
+            if (!hasValidFourHourWindow(bookingStart, bookingEnd)) {
+                return "No available 4-hour window with required capacity at selected time";
+            }
+            
+            int optimalSpotId = findOptimalSpotForPreBooking(bookingStart, bookingEnd);
+            if (optimalSpotId == -1) {
+                return "No optimal parking spot available for selected time";
+            }
+            
+            int userID = getUserID(userName);
+            if (userID == -1) {
+                return "User not found";
+            }
+            
+            return createReservationWithDateTime(userID, optimalSpotId, bookingStart, bookingEnd, "prebooking");
+            
+        } catch (Exception e) {
+            System.out.println("Error making pre-booking: " + e.getMessage());
+            return "Pre-booking failed: " + e.getMessage();
+        }
+    }
+    
+    /**
+     * Handle spontaneous parking entry
+     */
+    public String enterSpontaneousParking(String userName) {
+        LocalDateTime now = LocalDateTime.now();
+        
+        try {
+            SpotAllocation allocation = findOptimalSpontaneousAllocation(now);
+            if (allocation == null) {
+                return "No parking spots available for spontaneous parking (minimum 2 hours required)";
+            }
+            
+            int userID = getUserID(userName);
+            if (userID == -1) {
+                return "Invalid user code";
+            }
+            
+            int parkingCode = generateParkingCode();
+            LocalDateTime sessionEnd = now.plusHours(allocation.allocatedHours);
+            
+            String insertQuery = """
+                INSERT INTO ParkingInfo 
+                (ParkingSpot_ID, User_ID, Date, Code, Actual_start_time, Estimated_start_time, 
+                 Estimated_end_time, IsOrderedEnum, IsLate, IsExtended) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'not ordered', false, false)
+                """;
+            
+            try (PreparedStatement stmt = conn.prepareStatement(insertQuery)) {
+                stmt.setInt(1, allocation.spotId);
+                stmt.setInt(2, userID);
+                stmt.setDate(3, Date.valueOf(now.toLocalDate()));
+                stmt.setInt(4, parkingCode);
+                stmt.setTime(5, Time.valueOf(now.toLocalTime()));
+                stmt.setTime(6, Time.valueOf(now.toLocalTime()));
+                stmt.setTime(7, Time.valueOf(sessionEnd.toLocalTime()));
+                stmt.executeUpdate();
+                
+                updateSpotOccupancy(allocation.spotId, true);
+                
+                return String.format("Spontaneous parking successful! Code: %d, Spot: %d, Duration: %d hours%s",
+                                   parkingCode, allocation.spotId, allocation.allocatedHours,
+                                   allocation.hasEightHourWindow ? " (8+ hour window)" : "");
+            }
+            
+        } catch (Exception e) {
+            System.out.println("Error in spontaneous parking: " + e.getMessage());
+            return "Spontaneous parking failed: " + e.getMessage();
+        }
+    }
+    
+    /**
+     * Request parking extension during the last hour
+     */
+    public String requestParkingExtension(String parkingCodeStr) {
+        try {
+            int parkingCode = Integer.parseInt(parkingCodeStr);
+            
+            String sessionQuery = """
+                SELECT pi.*, ps.ParkingSpot_ID 
+                FROM ParkingInfo pi 
+                JOIN ParkingSpot ps ON pi.ParkingSpot_ID = ps.ParkingSpot_ID 
+                WHERE pi.Code = ? AND pi.Actual_end_time IS NULL
+                """;
+            
+            try (PreparedStatement stmt = conn.prepareStatement(sessionQuery)) {
+                stmt.setInt(1, parkingCode);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        int spotId = rs.getInt("ParkingSpot_ID");
+                        Time estimatedEndTime = rs.getTime("Estimated_end_time");
+                        Date date = rs.getDate("Date");
+                        
+                        LocalDateTime currentEndTime = LocalDateTime.of(date.toLocalDate(), estimatedEndTime.toLocalTime());
+                        LocalDateTime now = LocalDateTime.now();
+                        
+                        if (now.isBefore(currentEndTime.minusHours(1))) {
+                            return "Extensions can only be requested during the last hour of parking";
+                        }
+                        
+                        if (now.isAfter(currentEndTime)) {
+                            return "Parking session has already ended";
+                        }
+                        
+                        int maxExtensionHours = findMaximumExtension(spotId, currentEndTime);
+                        if (maxExtensionHours < MINIMUM_EXTENSION_HOURS) {
+                            return "No extension available - spot not free for minimum required time";
+                        }
+                        
+                        LocalDateTime newEndTime = currentEndTime.plusHours(maxExtensionHours);
+                        
+                        String updateQuery = """
+                            UPDATE ParkingInfo 
+                            SET Estimated_end_time = ?, IsExtended = true 
+                            WHERE Code = ?
+                            """;
+                        
+                        try (PreparedStatement updateStmt = conn.prepareStatement(updateQuery)) {
+                            updateStmt.setTime(1, Time.valueOf(newEndTime.toLocalTime()));
+                            updateStmt.setInt(2, parkingCode);
+                            updateStmt.executeUpdate();
+                            
+                            return String.format("Extension successful! Parking extended by %d hours until %s",
+                                               maxExtensionHours, newEndTime.format(DateTimeFormatter.ofPattern("HH:mm")));
+                        }
+                    }
+                }
+            }
+            
+        } catch (NumberFormatException e) {
+            return "Invalid parking code format";
+        } catch (Exception e) {
+            System.out.println("Error requesting extension: " + e.getMessage());
+        }
+        
+        return "Invalid parking code or parking session not found";
+    }
+    
+    /**
+     * Get parking system status
+     */
+    public String getSystemStatus() {
+        try {
+            int totalSpots = TOTAL_PARKING_SPOTS;
+            int occupiedSpots = getCurrentlyOccupiedSpots();
+            int availableSpots = totalSpots - occupiedSpots;
+            
+            return String.format("Smart Parking Status: %d total spots, %d occupied, %d available (%.1f%% available)",
+                               totalSpots, occupiedSpots, availableSpots, 
+                               (double) availableSpots / totalSpots * 100);
+                               
+        } catch (Exception e) {
+            return "Error getting system status: " + e.getMessage();
+        }
+    }
+
     // ========== HELPER METHODS ==========
+    
+    private static class SpotAllocation {
+        int spotId;
+        int allocatedHours;
+        boolean hasEightHourWindow;
+        
+        SpotAllocation(int spotId, int allocatedHours, boolean hasEightHourWindow) {
+            this.spotId = spotId;
+            this.allocatedHours = allocatedHours;
+            this.hasEightHourWindow = hasEightHourWindow;
+        }
+    }
+    
+    private boolean dateHasValidBookingWindow(LocalDate date) {
+        try {
+            LocalDateTime dayStart = LocalDateTime.of(date, LocalTime.of(0, 0));
+            LocalDateTime dayEnd = LocalDateTime.of(date, LocalTime.of(23, 45));
+            
+            LocalDateTime currentTime = dayStart;
+            while (!currentTime.isAfter(dayEnd.minusHours(STANDARD_BOOKING_HOURS))) {
+                LocalDateTime windowEnd = currentTime.plusHours(STANDARD_BOOKING_HOURS);
+                if (hasValidFourHourWindow(currentTime, windowEnd)) {
+                    return true;
+                }
+                currentTime = currentTime.plusMinutes(TIME_SLOT_MINUTES);
+            }
+        } catch (Exception e) {
+            System.out.println("Error checking date validity: " + e.getMessage());
+        }
+        return false;
+    }
+    
+    private boolean hasValidFourHourWindow(LocalDateTime startTime, LocalDateTime endTime) {
+        try {
+            int availableSpots = countAvailableSpotsForWindow(startTime, endTime);
+            return availableSpots >= (TOTAL_PARKING_SPOTS * AVAILABILITY_THRESHOLD);
+        } catch (Exception e) {
+            System.out.println("Error checking four-hour window: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private int countAvailableSpotsForWindow(LocalDateTime startTime, LocalDateTime endTime) {
+        try {
+            int occupiedSpots = getCurrentlyOccupiedSpots();
+            int reservedSpots = countReservationOverlaps(startTime, endTime);
+            return Math.max(0, TOTAL_PARKING_SPOTS - occupiedSpots - reservedSpots);
+        } catch (Exception e) {
+            System.out.println("Error counting available spots: " + e.getMessage());
+            return 0;
+        }
+    }
+    
+    private int findOptimalSpotForPreBooking(LocalDateTime bookingStart, LocalDateTime bookingEnd) {
+        try {
+            List<Integer> availableSpots = getAllAvailableSpots(bookingStart, bookingEnd);
+            
+            if (availableSpots.isEmpty()) {
+                return -1;
+            }
+            
+            // Return first available spot (simple allocation)
+            return availableSpots.get(0);
+            
+        } catch (Exception e) {
+            System.out.println("Error finding optimal spot: " + e.getMessage());
+            return -1;
+        }
+    }
+    
+    private SpotAllocation findOptimalSpontaneousAllocation(LocalDateTime startTime) {
+        try {
+            for (int hours = STANDARD_BOOKING_HOURS; hours >= MINIMUM_SPONTANEOUS_HOURS; hours--) {
+                LocalDateTime endTime = startTime.plusHours(hours);
+                List<Integer> availableSpots = getAllAvailableSpots(startTime, endTime);
+                
+                if (!availableSpots.isEmpty()) {
+                    return new SpotAllocation(availableSpots.get(0), hours, hours >= PREFERRED_WINDOW_HOURS);
+                }
+            }
+            
+            return null;
+            
+        } catch (Exception e) {
+            System.out.println("Error finding spontaneous allocation: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    private List<Integer> getAllAvailableSpots(LocalDateTime startTime, LocalDateTime endTime) throws SQLException {
+        List<Integer> availableSpots = new ArrayList<>();
+        
+        String spotsQuery = "SELECT ParkingSpot_ID FROM ParkingSpot WHERE isOccupied = false ORDER BY ParkingSpot_ID";
+        
+        try (PreparedStatement stmt = conn.prepareStatement(spotsQuery)) {
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    int spotId = rs.getInt("ParkingSpot_ID");
+                    if (isSpotAvailableForPeriod(spotId, startTime, endTime)) {
+                        availableSpots.add(spotId);
+                    }
+                }
+            }
+        }
+        
+        return availableSpots;
+    }
+    
+    private boolean isSpotAvailableForPeriod(int spotId, LocalDateTime startTime, LocalDateTime endTime) throws SQLException {
+        String conflictQuery = """
+            SELECT COUNT(*) FROM Reservations 
+            WHERE assigned_parking_spot_id = ? 
+            AND statusEnum = 'active'
+            AND NOT (reservation_Date < ? OR reservation_Date > ?)
+            """;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(conflictQuery)) {
+            stmt.setInt(1, spotId);
+            stmt.setDate(2, Date.valueOf(endTime.toLocalDate()));
+            stmt.setDate(3, Date.valueOf(startTime.toLocalDate()));
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1) == 0;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    private int findMaximumExtension(int spotId, LocalDateTime currentEndTime) {
+        try {
+            for (int hours = MAXIMUM_EXTENSION_HOURS; hours >= MINIMUM_EXTENSION_HOURS; hours--) {
+                LocalDateTime testEndTime = currentEndTime.plusHours(hours);
+                if (isSpotAvailableForPeriod(spotId, currentEndTime, testEndTime)) {
+                    return hours;
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("Error finding maximum extension: " + e.getMessage());
+        }
+        return 0;
+    }
+    
+    private LocalDateTime parseDateTime(String dateTimeStr) {
+        try {
+            if (dateTimeStr.contains("T")) {
+                return LocalDateTime.parse(dateTimeStr);
+            } else if (dateTimeStr.contains(" ")) {
+                return LocalDateTime.parse(dateTimeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            } else {
+                throw new IllegalArgumentException("Unsupported DATETIME format: " + dateTimeStr);
+            }
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid DATETIME format: " + dateTimeStr + ". Use 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DDTHH:MM'");
+        }
+    }
+    
+    private String createReservationWithDateTime(int userID, int spotId, LocalDateTime startTime, LocalDateTime endTime, String type) throws SQLException {
+        String insertQuery = """
+            INSERT INTO Reservations 
+            (User_ID, parking_ID, reservation_Date, Date_Of_Placing_Order, statusEnum, assigned_parking_spot_id) 
+            VALUES (?, ?, ?, NOW(), 'active', ?)
+            """;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(insertQuery, PreparedStatement.RETURN_GENERATED_KEYS)) {
+            stmt.setInt(1, userID);
+            stmt.setInt(2, spotId);
+            stmt.setDate(3, Date.valueOf(startTime.toLocalDate()));
+            stmt.setInt(4, spotId);
+            stmt.executeUpdate();
+            
+            try (ResultSet generatedKeys = stmt.getGeneratedKeys()) {
+                if (generatedKeys.next()) {
+                    int reservationCode = generatedKeys.getInt(1);
+                    
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+                    return String.format("%s successful! Code: %d, Spot: %d, Time: %s to %s",
+                                       type.substring(0, 1).toUpperCase() + type.substring(1),
+                                       reservationCode, spotId, 
+                                       startTime.format(formatter), endTime.format(formatter));
+                }
+            }
+        }
+        
+        return "Reservation creation failed";
+    }
+    
+    private int countReservationOverlaps(LocalDateTime startTime, LocalDateTime endTime) throws SQLException {
+        String query = """
+            SELECT COUNT(DISTINCT assigned_parking_spot_id) 
+            FROM Reservations 
+            WHERE assigned_parking_spot_id IS NOT NULL 
+            AND statusEnum = 'active'
+            AND reservation_Date >= ? 
+            AND reservation_Date <= ?
+            """;
+        
+        try (PreparedStatement stmt = conn.prepareStatement(query)) {
+            stmt.setDate(1, Date.valueOf(startTime.toLocalDate()));
+            stmt.setDate(2, Date.valueOf(endTime.toLocalDate()));
+            
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        }
+        
+        return 0;
+    }
+    
+    private int getCurrentlyOccupiedSpots() throws SQLException {
+        String query = "SELECT COUNT(*) FROM ParkingSpot WHERE isOccupied = true";
+        
+        try (PreparedStatement stmt = conn.prepareStatement(query)) {
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        }
+        return 0;
+    }
     
     private int generateParkingCode() {
         Random random = new Random();
         return 100000 + random.nextInt(900000);
     }
-
+    
     private int getUserID(String userName) {
         String qry = "SELECT User_ID FROM users WHERE UserName = ?";
         
@@ -745,7 +1107,12 @@ public class ParkingController {
         }
         return -1;
     }
-
+    
+    private boolean canMakeReservation() {
+        int availableSpots = getAvailableParkingSpots();
+        return availableSpots >= (TOTAL_PARKING_SPOTS * AVAILABILITY_THRESHOLD);
+    }
+    
     private int getAvailableParkingSpotID() {
         String qry = "SELECT ParkingSpot_ID FROM ParkingSpot WHERE isOccupied = false LIMIT 1";
         
@@ -760,7 +1127,7 @@ public class ParkingController {
         }
         return -1;
     }
-
+    
     private boolean isParkingSpotAvailable(int spotID) {
         String qry = "SELECT isOccupied FROM ParkingSpot WHERE ParkingSpot_ID = ?";
         
@@ -776,7 +1143,7 @@ public class ParkingController {
         }
         return false;
     }
-
+    
     private void updateParkingSpotStatus(int spotID, boolean isOccupied) {
         String qry = "UPDATE ParkingSpot SET isOccupied = ? WHERE ParkingSpot_ID = ?";
         
@@ -788,7 +1155,11 @@ public class ParkingController {
             System.out.println("Error updating parking spot status: " + e.getMessage());
         }
     }
-
+    
+    private void updateSpotOccupancy(int spotId, boolean isOccupied) throws SQLException {
+        updateParkingSpotStatus(spotId, isOccupied);
+    }
+    
     private void updateReservationStatus(int reservationCode, String status) {
         String qry = "UPDATE Reservations SET statusEnum = ? WHERE Reservation_code = ?";
         
@@ -800,9 +1171,8 @@ public class ParkingController {
             System.out.println("Error updating reservation status: " + e.getMessage());
         }
     }
-
+    
     private void sendLateExitNotification(int userID) {
-        // Simulate sending email/SMS notification
         String qry = "SELECT Email, Phone, Name FROM users WHERE User_ID = ?";
         
         try (PreparedStatement stmt = conn.prepareStatement(qry)) {
@@ -837,44 +1207,5 @@ public class ParkingController {
         }
         
         return false;
-    }
-    
-    private void finishReservationBySpotAndUser(int spotID, int userID) {
-        String query = """
-            UPDATE Reservations 
-            SET statusEnum = 'finished'
-            WHERE User_ID = ? AND assigned_parking_spot_id = ? AND statusEnum = 'active'
-            """;
-        
-        try (PreparedStatement stmt = conn.prepareStatement(query)) {
-            stmt.setInt(1, userID);
-            stmt.setInt(2, spotID);
-            int updated = stmt.executeUpdate();
-            
-            if (updated > 0) {
-                System.out.println("Reservation finished for user " + userID + " at spot " + spotID);
-            }
-        } catch (SQLException e) {
-            System.out.println("Error finishing reservation: " + e.getMessage());
-        }
-    }
-    
-    private void freeSpotForReservation(int reservationCode) {
-        String query = """
-            UPDATE ParkingSpot ps
-            SET ps.isOccupied = FALSE
-            WHERE ps.ParkingSpot_ID = (
-                SELECT r.assigned_parking_spot_id 
-                FROM Reservations r 
-                WHERE r.Reservation_code = ?
-            )
-            """;
-        
-        try (PreparedStatement stmt = conn.prepareStatement(query)) {
-            stmt.setInt(1, reservationCode);
-            stmt.executeUpdate();
-        } catch (SQLException e) {
-            System.out.println("Error freeing spot for reservation: " + e.getMessage());
-        }
     }
 }
