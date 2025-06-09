@@ -59,7 +59,7 @@ public class ParkingServer extends AbstractServer {
     public ParkingServer(int port) {
         super(port);
         try {
-            serverIp = InetAddress.getLocalHost().getHostAddress() + ":" + port; // IP:PORT
+            serverIp = InetAddress.getLocalHost().getHostAddress();
         } catch (Exception e) {
             e.printStackTrace();
         }
